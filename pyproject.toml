@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Data visualisation and estimation tools based on kernel regression"
 readme = "README_PYPI.md"
 requires-python = ">=3.10"
-license = "MIT"
+license = {text = "MIT"}
 authors = [
     {name = "tlaiho", email = "tslaiho@gmail.com"},
 ]
@@ -36,6 +36,9 @@ Issues = "https://github.com/tlaiho/kernelmoments/issues"
 
 [project.optional-dependencies]
 gpu = ["cupy-cuda12x"]
+
+[tool.setuptools.packages.find]
+include = ["kernelmoments*"]
 
 [tool.pytest.ini_options]
 python_files = ["*_tests.py", "test_*.py"]

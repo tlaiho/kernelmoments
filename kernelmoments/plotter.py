@@ -1,4 +1,4 @@
-""" Classes and functions for quick plotting."""
+"""Classes and functions for quick plotting."""
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -55,7 +55,7 @@ class Plotter:
 
     Args:
         df: pandas or polars DataFrame. Required for fit() and plot_relationship().
-        x_scaler: Sklearn-compatible scaler applied to the conditioning 
+        x_scaler: Sklearn-compatible scaler applied to the conditioning
         variable before fitting.
         n_sample: If set, randomly subsample data to this many observations
             before fitting. Speeds up estimation with little quality loss.
@@ -80,6 +80,7 @@ class Plotter:
         self.seed = seed
         self.style = style if style is not None else PlotStyle()
 
+        self._scaler_fitted: bool = False
         self.estimators: dict[tuple, BaseEstimator] = {}
 
     def fit(
@@ -108,11 +109,10 @@ class Plotter:
             "variance", x_arr, y_arr
         )
         if z is not None:
-            self.estimators[("covariance", x, y, z, po_key)] = self._fit_moment(
-                "covariance", x_arr, y_arr, z_arr
-            )
-            self.estimators[("correlation", x, y, z, po_key)] = self._fit_moment(
-                "correlation", x_arr, y_arr, z_arr
+            cov_est = self._fit_moment("covariance", x_arr, y_arr, z_arr)
+            self.estimators[("covariance", x, y, z, po_key)] = cov_est
+            self.estimators[("correlation", x, y, z, po_key)] = (
+                cov_est.fit_correlation()
             )
 
         return self
@@ -143,8 +143,11 @@ class Plotter:
         z_arr = cols.get("z")
         w_arr = cols.get("w")
 
-        if self.x_scaler is not None:
+        if self.x_scaler is not None and not self._scaler_fitted:
             x_arr = self.x_scaler.fit_transform(x_arr.reshape(-1, 1)).ravel()
+            self._scaler_fitted = True
+        elif self.x_scaler is not None:
+            x_arr = self.x_scaler.transform(x_arr.reshape(-1, 1)).ravel()
 
         has_controls = w_arr is not None
         has_instrument = z_arr is not None
@@ -229,9 +232,7 @@ class Plotter:
             if z is None:
                 raise ValueError("moment='correlation' requires z")
             return (
-                CovarianceEstimator(**self.tree_params)
-                .fit(x, y, z)
-                .fit_correlation()
+                CovarianceEstimator(**self.tree_params).fit(x, y, z).fit_correlation()
             )
         else:
             raise ValueError(f"Unknown moment: {moment!r}")
@@ -269,7 +270,7 @@ class Plotter:
         _validate_moment(moment, z)
 
         po_key = self._partial_out_key(partial_out)
-        if z:
+        if z is not None:
             cache_key = (moment, x, y, z, po_key)
         else:
             cache_key = (moment, x, y, po_key)
@@ -292,9 +293,9 @@ class Plotter:
             np.quantile(x_arr, style.x_quantile_trim),
             np.quantile(x_arr, 1 - style.x_quantile_trim),
             n_grid,
-            dtype=np.float32
-            )
-        
+            dtype=np.float32,
+        )
+
         if self.x_scaler is not None:
             x_grid = self.x_scaler.inverse_transform(
                 x_grid_scaled.reshape(-1, 1)
@@ -326,14 +327,42 @@ class Plotter:
                 )
                 y_var = var_est.predict(x_grid_scaled.reshape(-1, 1))
             _plot_mean(
-                ax, x_arr_display, y_arr, x_grid, y_values, style, y_var, y_name=y_label
+                ax,
+                x_arr_display,
+                y_arr,
+                x_grid,
+                y_values,
+                style,
+                y_var,
+                y_name=y_label,
+                seed=self.seed,
             )
         elif moment == "variance":
-            _plot_variance(ax, x_grid, y_values, style, x_name=x, y_name=y, controls=controls_label)
+            _plot_variance(
+                ax, x_grid, y_values, style, x_name=x, y_name=y, controls=controls_label
+            )
         elif moment == "covariance":
-            _plot_covariance(ax, x_grid, y_values, style, x_name=x, y_name=y, z_name=z, controls=controls_label)
+            _plot_covariance(
+                ax,
+                x_grid,
+                y_values,
+                style,
+                x_name=x,
+                y_name=y,
+                z_name=z,
+                controls=controls_label,
+            )
         elif moment == "correlation":
-            _plot_correlation(ax, x_grid, y_values, style, x_name=x, y_name=y, z_name=z, controls=controls_label)
+            _plot_correlation(
+                ax,
+                x_grid,
+                y_values,
+                style,
+                x_name=x,
+                y_name=y,
+                z_name=z,
+                controls=controls_label,
+            )
 
         ax.set_xlabel(x_label)
         if style.x_lim is not None:
@@ -349,7 +378,7 @@ class Plotter:
         )
 
 
-def _validate_moment(moment: str, z: np.ndarray | None = None) -> None:
+def _validate_moment(moment: str, z: str | np.ndarray | None = None) -> None:
     valid = ("mean", "variance", "covariance", "correlation")
     if moment not in valid:
         raise ValueError(f"Unknown moment: {moment!r}")
@@ -364,10 +393,11 @@ def _plot_mean(
     x_grid: np.ndarray,
     y_mean: np.ndarray,
     style: PlotStyle,
-    y_variance: np.ndarray = None,
+    y_variance: np.ndarray | None = None,
     y_name: str = "Y",
+    seed: int = 0,
 ) -> None:
-    x_scatter, y_scatter = _downsample_scatter(x, y, style)
+    x_scatter, y_scatter = _downsample_scatter(x, y, style, seed=seed)
     ax.scatter(
         x_scatter,
         y_scatter,
@@ -457,10 +487,11 @@ def _downsample_scatter(
     x: np.ndarray,
     y: np.ndarray,
     style: PlotStyle,
+    seed: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Thin scatter points for display only (estimation is unaffected)."""
     if style.scatter_max_points is not None and len(x) > style.scatter_max_points:
-        idx = np.random.default_rng(0).choice(
+        idx = np.random.default_rng(seed).choice(
             len(x), style.scatter_max_points, replace=False
         )
         return x[idx], y[idx]
@@ -490,7 +521,7 @@ def plot_relationship(
         y: Dependent variable (1D array).
         moment: 'mean', 'variance', or 'covariance'.
         z: Second dependent variable for covariance (1D array).
-        x_plot: Original-scale x values for display (1D array) so 
+        x_plot: Original-scale x values for display (1D array) so
         the plot axes show the original scale.
         partial_out: Variables to partial out.
         bands: Show ±1.96·√Var prediction bands for moment='mean'.
@@ -569,9 +600,13 @@ def plot_relationship(
     elif moment == "variance":
         _plot_variance(ax, x_grid, y_values, style, x_name=x_name, y_name=y_name)
     elif moment == "covariance":
-        _plot_covariance(ax, x_grid, y_values, style, x_name=x_name, y_name=y_name, z_name=z_name)
+        _plot_covariance(
+            ax, x_grid, y_values, style, x_name=x_name, y_name=y_name, z_name=z_name
+        )
     elif moment == "correlation":
-        _plot_correlation(ax, x_grid, y_values, style, x_name=x_name, y_name=y_name, z_name=z_name)
+        _plot_correlation(
+            ax, x_grid, y_values, style, x_name=x_name, y_name=y_name, z_name=z_name
+        )
 
     ax.set_xlabel(x_name)
     if style.x_lim is not None:

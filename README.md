@@ -4,6 +4,8 @@ Estimate and visualize conditional moments — means, variances, covariances, an
 
 Designed for interactive data exploration. Achieves subsecond fitting even on larger datasets (CPU: 5-10k rows, GPU: 25-50k rows). See the [tutorial](examples/tutorial.ipynb) for a full walkthrough and the [wages example](examples/wages.ipynb) for cross-fitted partialling out.
 
+![Conditional moments of Coca-Cola and PepsiCo returns given S&P 500](assets/hero.png)
+
 ## Installation
 
 ```bash

@@ -1,5 +1,5 @@
 [![PyPI version](https://img.shields.io/pypi/v/kernelmoments)](https://pypi.org/project/kernelmoments/)
-[![Python](https://img.shields.io/pypi/pyversions/kernelmoments)](https://pypi.org/project/kernelmoments/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/kernelmoments/)
 [![License: MIT](https://img.shields.io/pypi/l/kernelmoments)](https://opensource.org/licenses/MIT)
 [![NumPy](https://img.shields.io/badge/NumPy-%23013243?logo=numpy&logoColor=white)](https://numpy.org/)
 [![CuPy](https://img.shields.io/badge/CuPy-%23013243?logo=nvidia&logoColor=white)](https://cupy.dev/)

@@ -80,7 +80,7 @@ class Plotter:
         self.seed = seed
         self.style = style if style is not None else PlotStyle()
 
-        self._scaler_fitted: bool = False
+        self._scaler_fitted: dict[str, bool] = {}
         self.estimators: dict[tuple, BaseEstimator] = {}
 
     def fit(
@@ -143,9 +143,9 @@ class Plotter:
         z_arr = cols.get("z")
         w_arr = cols.get("w")
 
-        if self.x_scaler is not None and not self._scaler_fitted:
+        if self.x_scaler is not None and not self._scaler_fitted.get(x, False):
             x_arr = self.x_scaler.fit_transform(x_arr.reshape(-1, 1)).ravel()
-            self._scaler_fitted = True
+            self._scaler_fitted[x] = True
         elif self.x_scaler is not None:
             x_arr = self.x_scaler.transform(x_arr.reshape(-1, 1)).ravel()
 
@@ -247,7 +247,6 @@ class Plotter:
         bands: bool = False,
         ax: plt.Axes | None = None,
         n_grid: int = 200,
-        style: PlotStyle | None = None,
     ) -> PlotResult:
         """Plot the conditional moment of y given x.
 
@@ -260,13 +259,10 @@ class Plotter:
             bands: Show ±1.96·√Var prediction bands for moment='mean'.
             ax: Optional matplotlib Axes.
             n_grid: Number of points for the smooth curve.
-            style: Plot styling overrides (defaults to Plotter's style).
 
         Returns:
             PlotResult with figure, axes, grid, predicted values, and estimator.
         """
-        style = style or self.style
-
         _validate_moment(moment, z)
 
         po_key = self._partial_out_key(partial_out)
@@ -290,8 +286,8 @@ class Plotter:
 
         # build grid in scaled space for prediction, original space for display
         x_grid_scaled = np.linspace(
-            np.quantile(x_arr, style.x_quantile_trim),
-            np.quantile(x_arr, 1 - style.x_quantile_trim),
+            np.quantile(x_arr, self.style.x_quantile_trim),
+            np.quantile(x_arr, 1 - self.style.x_quantile_trim),
             n_grid,
             dtype=np.float32,
         )
@@ -332,21 +328,21 @@ class Plotter:
                 y_arr,
                 x_grid,
                 y_values,
-                style,
+                self.style,
                 y_var,
                 y_name=y_label,
                 seed=self.seed,
             )
         elif moment == "variance":
             _plot_variance(
-                ax, x_grid, y_values, style, x_name=x, y_name=y, controls=controls_label
+                ax, x_grid, y_values, self.style, x_name=x, y_name=y, controls=controls_label
             )
         elif moment == "covariance":
             _plot_covariance(
                 ax,
                 x_grid,
                 y_values,
-                style,
+                self.style,
                 x_name=x,
                 y_name=y,
                 z_name=z,
@@ -357,7 +353,7 @@ class Plotter:
                 ax,
                 x_grid,
                 y_values,
-                style,
+                self.style,
                 x_name=x,
                 y_name=y,
                 z_name=z,
@@ -365,10 +361,12 @@ class Plotter:
             )
 
         ax.set_xlabel(x_label)
-        if style.x_lim is not None:
-            ax.set_xlim(*style.x_lim)
-        if style.y_lim is not None:
-            ax.set_ylim(*style.y_lim)
+        if self.style.x_lim is not None:
+            ax.set_xlim(*self.style.x_lim)
+        else:
+            ax.set_xlim(x_grid[0], x_grid[-1])
+        if self.style.y_lim is not None:
+            ax.set_ylim(*self.style.y_lim)
         return PlotResult(
             x_values=x_grid,
             y_values=y_values,
@@ -376,6 +374,62 @@ class Plotter:
             fig=fig,
             ax=ax,
         )
+
+    def plot_many(
+        self,
+        x: list[str],
+        y: str,
+        z: str | None = None,
+        moment: str = "mean",
+        partial_out: str | list[str] | None = None,
+        bands: bool = False,
+        n_cols: int = 2,
+        figsize: tuple[float, float] | None = None,
+        n_grid: int = 200,
+    ) -> tuple[plt.Figure, list[PlotResult]]:
+        """Plot the conditional moment of y for each x variable in a subplot grid.
+
+        Args:
+            x: List of column names for conditioning variables.
+            y: Column name for dependent variable (shared across subplots).
+            z: Column name for second dependent variable (covariance/correlation).
+            moment: 'mean', 'variance', 'covariance', or 'correlation'.
+            partial_out: Column names to partial out.
+            bands: Show ±1.96·√Var prediction bands for moment='mean'.
+            n_cols: Number of columns in the subplot grid.
+            figsize: Figure size (width, height). Defaults to (5*n_cols, 4*n_rows).
+            n_grid: Number of points for the smooth curve.
+
+        Returns:
+            Tuple of (fig, list of PlotResult).
+        """
+        n_cols = min(n_cols, len(x))
+        n_rows = int(np.ceil(len(x) / n_cols))
+        if figsize is None:
+            figsize = (5 * n_cols, 4 * n_rows)
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+        axes_flat = np.atleast_1d(axes).ravel()
+
+        results = []
+        for i, xi in enumerate(x):
+            result = self.plot(
+                x=xi,
+                y=y,
+                z=z,
+                moment=moment,
+                partial_out=partial_out,
+                bands=bands,
+                ax=axes_flat[i],
+                n_grid=n_grid,
+            )
+            results.append(result)
+
+        for j in range(len(x), len(axes_flat)):
+            axes_flat[j].set_visible(False)
+
+        fig.tight_layout()
+        return fig, results
 
 
 def _validate_moment(moment: str, z: str | np.ndarray | None = None) -> None:
@@ -570,14 +624,14 @@ def plot_relationship(
         estimator = CovarianceEstimator(**tree_params).fit(x_2d, y, z).fit_correlation()
 
     x_pred = np.linspace(
-        np.quantile(x, style.x_quantile_trim),
-        np.quantile(x, 1 - style.x_quantile_trim),
+        np.quantile(x, self.style.x_quantile_trim),
+        np.quantile(x, 1 - self.style.x_quantile_trim),
         n_grid,
         dtype=np.float32,
     )
     x_grid = np.linspace(
-        np.quantile(x_plot, style.x_quantile_trim),
-        np.quantile(x_plot, 1 - style.x_quantile_trim),
+        np.quantile(x_plot, self.style.x_quantile_trim),
+        np.quantile(x_plot, 1 - self.style.x_quantile_trim),
         n_grid,
         dtype=np.float32,
     )
@@ -609,10 +663,10 @@ def plot_relationship(
         )
 
     ax.set_xlabel(x_name)
-    if style.x_lim is not None:
-        ax.set_xlim(*style.x_lim)
-    if style.y_lim is not None:
-        ax.set_ylim(*style.y_lim)
+    if self.style.x_lim is not None:
+        ax.set_xlim(*self.style.x_lim)
+    if self.style.y_lim is not None:
+        ax.set_ylim(*self.style.y_lim)
 
     return PlotResult(
         x_values=x_grid,

@@ -12,6 +12,7 @@ from .estimators import (
     cross_fit_residualize,
 )
 from .utils import validate
+from copy import deepcopy
 
 
 @dataclass
@@ -59,11 +60,9 @@ class Plotter:
         variable before fitting.
         n_sample: If set, randomly subsample data to this many observations
             before fitting. Speeds up estimation with little quality loss.
-        seed: RNG seed for subsampling, partial-out fold assignment, and
-            kernel fits.
-        correction: Leverage/LOO residual correction (see BaseEstimator).
-        cross_fit: k-fold cross-fitting for the estimators (see BaseEstimator).
-            When set, also used as the fold count for partialling out.
+        seed: RNG seed
+        correction: Leverage/LOO residual correction.
+        cross_fit: k-fold cross-fitting for the estimators.
         **tree_params: Forwarded to KernelTree (kernel_type, min_sample, etc.).
     """
 
@@ -79,6 +78,10 @@ class Plotter:
         cross_fit: int = 0,
         **tree_params,
     ) -> None:
+        
+        if not (cross_fit == 0 or cross_fit >= 2):
+            raise ValueError("cross_fit must be 0 (off) or >= 2 (k-fold).")
+        
         self.df = df
         self.tree_params: dict[str, object] = {
             "use_gpu": use_gpu, "seed": seed, **tree_params
@@ -92,7 +95,8 @@ class Plotter:
         self.seed = seed
         self.style = style if style is not None else PlotStyle()
 
-        self._scaler_fitted: dict[str, bool] = {}
+        self._scalers: dict[str, Any] = {}
+        self._arrays: dict[tuple, tuple] = {}
         self.estimators: dict[tuple, BaseEstimator] = {}
 
     def fit(
@@ -116,10 +120,10 @@ class Plotter:
 
         po_key = self._partial_out_key(partial_out)
 
-        self.estimators[("mean", x, y, po_key)] = self._fit_moment("mean", x_arr, y_arr)
-        self.estimators[("variance", x, y, po_key)] = self._fit_moment(
-            "variance", x_arr, y_arr
-        )
+        # using the variance fits mean estimate:
+        var_est = self._fit_moment("variance", x_arr, y_arr)
+        self.estimators[("variance", x, y, po_key)] = var_est
+        self.estimators[("mean", x, y, po_key)] = var_est.mean_estimator_
         if z is not None:
             cov_est = self._fit_moment("covariance", x_arr, y_arr, z_arr)
             self.estimators[("covariance", x, y, z, po_key)] = cov_est
@@ -150,31 +154,37 @@ class Plotter:
         Returns:
             (x_arr, y_arr, z_arr) — z_arr is None when z is not given.
         """
+        key = (x, y, z, self._partial_out_key(partial_out))
+        if key in self._arrays:
+            return self._arrays[key]
+
         cols = self._resolve(x=x, y=y, z=z, w=partial_out)
         x_arr, y_arr = cols["x"].ravel(), cols["y"].ravel()
         z_arr = cols.get("z")
         w_arr = cols.get("w")
 
-        if self.x_scaler is not None and not self._scaler_fitted.get(x, False):
-            x_arr = self.x_scaler.fit_transform(x_arr.reshape(-1, 1)).ravel()
-            self._scaler_fitted[x] = True
-        elif self.x_scaler is not None:
-            x_arr = self.x_scaler.transform(x_arr.reshape(-1, 1)).ravel()
+        if self.x_scaler is not None:
+            if x not in self._scalers:
+                scaler = deepcopy(self.x_scaler)
+                x_arr = scaler.fit_transform(x_arr.reshape(-1, 1)).ravel()
+                self._scalers[x] = scaler
+            else:
+                x_arr = self._scalers[x].transform(x_arr.reshape(-1, 1)).ravel()
 
         has_controls = w_arr is not None
-        has_instrument = z_arr is not None
+        has_z = z_arr is not None
 
         if self.n_sample is not None and self.n_sample < x_arr.shape[0]:
             idx = np.random.default_rng(self.seed).choice(
                 x_arr.shape[0], self.n_sample, replace=False
             )
             x_arr, y_arr = x_arr[idx], y_arr[idx]
-            if has_instrument:
+            if has_z:
                 z_arr = z_arr[idx]
             if has_controls:
                 w_arr = w_arr[idx]
 
-        if has_controls and has_instrument:
+        if has_controls and has_z:
             y_arr, x_arr, z_arr = cross_fit_residualize(
                 w_arr, y_arr, x_arr, z_arr, tree_params=self.tree_params,
                 n_folds=self.cross_fit or 3, seed=self.seed,
@@ -185,7 +195,8 @@ class Plotter:
                 n_folds=self.cross_fit or 3, seed=self.seed,
             )
 
-        return x_arr.reshape(-1, 1), y_arr, z_arr
+        self._arrays[key] = (x_arr.reshape(-1, 1), y_arr, z_arr)
+        return self._arrays[key]
 
     def _resolve(self, **names: Any) -> dict[str, np.ndarray]:
         """Extract named columns from self.df as numpy arrays."""
@@ -269,7 +280,7 @@ class Plotter:
         Args:
             x: Column name for conditioning variable.
             y: Column name for dependent variable.
-            moment: 'mean', 'variance', or 'covariance'.
+            moment: 'mean', 'variance', 'covariance', or 'correlation'.
             z: Column name for second dependent variable (covariance).
             partial_out: Column names to partial out.
             bands: Show ±1.96·√Var prediction bands for moment='mean'.
@@ -315,8 +326,10 @@ class Plotter:
             dtype=np.float32,
         )
 
-        if self.x_scaler is not None:
-            x_grid = self.x_scaler.inverse_transform(
+        # with partial_out, x is a residual outside the scaler's input space
+        display_original = self.x_scaler is not None and po_key is None
+        if display_original:
+            x_grid = self._scalers[x].inverse_transform(
                 x_grid_scaled.reshape(-1, 1)
             ).ravel()
         else:
@@ -333,8 +346,8 @@ class Plotter:
             y_values = estimator.predict(x_grid_scaled.reshape(-1, 1))
 
         # use original-scale x for scatter and axis display
-        if self.x_scaler is not None:
-            x_arr_display = self.x_scaler.inverse_transform(x_arr).ravel()
+        if display_original:
+            x_arr_display = self._scalers[x].inverse_transform(x_arr).ravel()
         else:
             x_arr_display = x_arr.ravel()
 
@@ -472,7 +485,7 @@ def _plot_mean(
     style: PlotStyle,
     y_variance: np.ndarray | None = None,
     y_name: str = "Y",
-    seed: int = 0,
+    seed: int | None = 0,
 ) -> None:
     x_scatter, y_scatter = _downsample_scatter(x, y, style, seed=seed)
     ax.scatter(
@@ -564,7 +577,7 @@ def _downsample_scatter(
     x: np.ndarray,
     y: np.ndarray,
     style: PlotStyle,
-    seed: int = 0,
+    seed: int | None = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Thin scatter points for display only (estimation is unaffected)."""
     if style.scatter_max_points is not None and len(x) > style.scatter_max_points:
@@ -580,9 +593,8 @@ def plot_relationship(
     y: np.ndarray,
     moment: str = "mean",
     z: np.ndarray | None = None,
-    x_plot: np.ndarray | None = None,
     partial_out: np.ndarray | None = None,
-    bands: bool = True,
+    bands: bool = False,
     ax: plt.Axes | None = None,
     n_grid: int = 200,
     style: PlotStyle | None = None,
@@ -591,6 +603,7 @@ def plot_relationship(
     z_name: str = "Z",
     correction: bool = True,
     cross_fit: int = 0,
+    seed: int | None = None,
     **tree_params,
 ) -> PlotResult:
     """Plot the conditional moment of y given x.
@@ -598,10 +611,8 @@ def plot_relationship(
     Args:
         x: Conditioning variable (1D array).
         y: Dependent variable (1D array).
-        moment: 'mean', 'variance', or 'covariance'.
+        moment: 'mean', 'variance', 'covariance', or 'correlation'.
         z: Second dependent variable for covariance (1D array).
-        x_plot: Original-scale x values for display (1D array) so
-        the plot axes show the original scale.
         partial_out: Variables to partial out.
         bands: Show ±1.96·√Var prediction bands for moment='mean'.
         ax: Optional matplotlib Axes.
@@ -610,22 +621,22 @@ def plot_relationship(
         x_name: Label for the x-axis.
         y_name: Label for the y variable.
         z_name: Label for the z variable (covariance/correlation).
-        correction: Leverage/LOO residual correction (see BaseEstimator).
-        cross_fit: k-fold cross-fitting for the estimators (see BaseEstimator).
-            When set, also used as the fold count for partialling out.
+        correction: Leverage/LOO residual correction.
+        cross_fit: k-fold cross-fitting for the estimators.
+        seed: RNG seed
         **tree_params: Forwarded to KernelTree (use_gpu, kernel_type, etc.).
 
     Returns:
         PlotResult with figure, axes, grid, predicted values, and estimator.
     """
+    _validate_moment(moment, z)
+
     if style is None:
         style = PlotStyle()
 
+    tree_params["seed"] = seed
+
     x = np.asarray(x, dtype=np.float32).ravel()
-    if x_plot is None:
-        x_plot = x
-    else:
-        x_plot = np.asarray(x_plot, dtype=np.float32).ravel()
     if z is not None:
         _, y, z = validate(x.reshape(-1, 1), y, z)
     else:
@@ -634,25 +645,21 @@ def plot_relationship(
     if partial_out is not None:
         (W,) = validate(partial_out)
         n_folds = cross_fit or 3
-        fold_seed = tree_params.get("seed", 42)
         if z is not None:
             y, x, z = cross_fit_residualize(
-                W, y, x, z, tree_params=tree_params, n_folds=n_folds, seed=fold_seed
+                W, y, x, z, tree_params=tree_params, n_folds=n_folds, seed=seed
             )
         else:
             y, x = cross_fit_residualize(
-                W, y, x, tree_params=tree_params, n_folds=n_folds, seed=fold_seed
+                W, y, x, tree_params=tree_params, n_folds=n_folds, seed=seed
             )
 
     x_2d = x.reshape(-1, 1)
-
-    _validate_moment(moment, z)
 
     estimator_params = {"correction": correction, "cross_fit": cross_fit, **tree_params}
     var_est = None
     if moment == "mean":
         if bands:
-            # the variance fit contains its own full-sample mean fit — reuse it
             var_est = VarianceEstimator(**estimator_params).fit(x_2d, y)
             estimator = var_est.mean_estimator_
         else:
@@ -666,22 +673,16 @@ def plot_relationship(
             CovarianceEstimator(**estimator_params).fit(x_2d, y, z).fit_correlation()
         )
 
-    x_pred = np.linspace(
+    x_grid = np.linspace(
         np.quantile(x, style.x_quantile_trim),
         np.quantile(x, 1 - style.x_quantile_trim),
         n_grid,
         dtype=np.float32,
     )
-    x_grid = np.linspace(
-        np.quantile(x_plot, style.x_quantile_trim),
-        np.quantile(x_plot, 1 - style.x_quantile_trim),
-        n_grid,
-        dtype=np.float32,
-    )
     if moment == "correlation":
-        y_values = estimator.predict_correlation(x_pred.reshape(-1, 1))
+        y_values = estimator.predict_correlation(x_grid.reshape(-1, 1))
     else:
-        y_values = estimator.predict(x_pred.reshape(-1, 1))
+        y_values = estimator.predict(x_grid.reshape(-1, 1))
 
     if ax is None:
         fig, ax = plt.subplots()
@@ -689,8 +690,8 @@ def plot_relationship(
         fig = ax.get_figure()
 
     if moment == "mean":
-        y_var = var_est.predict(x_pred.reshape(-1, 1)) if bands else None
-        _plot_mean(ax, x_plot, y, x_grid, y_values, style, y_var, y_name=y_name)
+        y_var = var_est.predict(x_grid.reshape(-1, 1)) if bands else None
+        _plot_mean(ax, x, y, x_grid, y_values, style, y_var, y_name=y_name, seed=seed)
     elif moment == "variance":
         _plot_variance(ax, x_grid, y_values, style, x_name=x_name, y_name=y_name)
     elif moment == "covariance":

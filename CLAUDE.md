@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-kernelmoments provides data visualization and estimation tools based on fast kernel regression (Nadaraya-Watson), using KernelTree from `kernelboost` as the estimation engine. The focus is data exploration rather than prediction. Each kernel fit gets its own bandwidth via LOO-CV.
+kernelmoments provides data visualization and estimation tools based on fast kernel regression (Nadaraya-Watson), using KernelTree from `kernelboost` as the estimation engine. The focus is data exploration rather than prediction. Each kernel fit gets its own bandwidth, selected via pilot-AICc by default (favors oversmoothing, which suits visualization).
 
 ## Commands
 
@@ -51,7 +51,7 @@ Estimator-level args (`correction`, `cross_fit`) are named parameters on both `P
 
 ### Key dependency
 
-`kernelboost` provides `KernelTree` (tree-partitioned kernel regression) and `KernelEstimator` (bandwidth optimization via LOO-CV). All estimation in this library delegates to these.
+`kernelboost` provides `KernelTree` (tree-partitioned kernel regression) and `KernelEstimator` (bandwidth optimization). All estimation in this library delegates to these.
 
 ## Test Conventions
 

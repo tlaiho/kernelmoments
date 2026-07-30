@@ -25,10 +25,10 @@ class BaseEstimator:
         cross_fit: int = 0,
     ) -> None:
 
-        if cross_fit < 0 or cross_fit == 1:
+        if not (cross_fit == 0 or cross_fit >= 2):
             raise ValueError("cross_fit must be 0 (off) or >= 2 (k-fold).")
         self.correction = correction # internal param
-        self.cross_fit = cross_fit  # internal param; supersedes correction when >= 2
+        self.cross_fit = cross_fit  # internal param
         self.tree_params: dict[str, object] = dict(
             min_sample=min_sample,
             max_sample=max_sample,
@@ -114,14 +114,13 @@ class VarianceEstimator(BaseEstimator):
         self.X_ = X
 
         # pass 1: estimate conditional mean
-        self.mean_estimator_ = MeanEstimator(**self.tree_params).fit(X, y)
+        self.mean_estimator_ = MeanEstimator(
+            correction=self.correction, cross_fit=self.cross_fit, **self.tree_params
+        ).fit(X, y)
         self.training_mean_ = self.mean_estimator_.predict(X)
         if self.cross_fit >= 2:
-            # out-of-fold residuals; no own-observation term, so no correction
-            (residuals,) = cross_fit_residualize(
-                X, y, tree_params=self.tree_params,
-                n_folds=self.cross_fit, seed=self.tree_params["seed"],
-            )
+            # out-of-fold residuals from pass 1
+            residuals = self.mean_estimator_.residuals_
         else:
             residuals = y - self.training_mean_
             if self.correction:
@@ -140,7 +139,7 @@ class VarianceEstimator(BaseEstimator):
         variance = self.variance_tree_.predict(X).ravel()
         return np.maximum(variance, 0.0)
 
-    def unconditional(self) -> float:
+    def mean_conditional_variance(self) -> float:
         """Return unconditional variance (average of conditional variance over training X)."""
         if self.variance_tree_ is None:
             raise RuntimeError("Estimator not fitted. Call fit() first.")
@@ -207,7 +206,7 @@ class CovarianceEstimator(BaseEstimator):
         (X,) = validate(X)
         return self.covariance_tree_.predict(X).ravel()
 
-    def unconditional(self) -> float:
+    def mean_conditional_covariance(self) -> float:
         """Return unconditional covariance (average of conditional covariance over training X)."""
         if self.covariance_tree_ is None:
             raise RuntimeError("Estimator not fitted. Call fit() first.")
@@ -238,11 +237,11 @@ class CovarianceEstimator(BaseEstimator):
         denom = np.maximum(np.sqrt(var_y * var_z), 1e-8)
         return np.clip(cov / denom, -1.0, 1.0)
 
-    def unconditional_correlation(self) -> float:
+    def mean_conditional_correlation(self) -> float:
         """Return unconditional correlation (average of conditional correlation over training X)."""
         if not hasattr(self, "variance_y_tree_") or self.variance_y_tree_ is None:
             raise RuntimeError(
-                "Call fit_correlation() before unconditional_correlation()."
+                "Call fit_correlation() before mean_conditional_correlation()."
             )
         return float(np.mean(self.predict_correlation(self.X_)))
 
@@ -272,6 +271,8 @@ def cross_fit_residualize(
     Returns:
         Tuple of residualized arrays, same order as targets.
     """
+    if n_folds < 2:
+        raise ValueError("n_folds must be >= 2.")
     W, *targets = validate(W, *targets)
     n = W.shape[0]
     if tree_params is None:

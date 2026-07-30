@@ -59,8 +59,12 @@ class Plotter:
         variable before fitting.
         n_sample: If set, randomly subsample data to this many observations
             before fitting. Speeds up estimation with little quality loss.
-        seed: RNG seed for subsampling.
-        **tree_params: Forwarded to KernelTree (use_gpu, kernel_type, etc.).
+        seed: RNG seed for subsampling, partial-out fold assignment, and
+            kernel fits.
+        correction: Leverage/LOO residual correction (see BaseEstimator).
+        cross_fit: k-fold cross-fitting for the estimators (see BaseEstimator).
+            When set, also used as the fold count for partialling out.
+        **tree_params: Forwarded to KernelTree (kernel_type, min_sample, etc.).
     """
 
     def __init__(
@@ -71,10 +75,18 @@ class Plotter:
         n_sample: int | None = None,
         seed: int = 42,
         style: PlotStyle | None = None,
+        correction: bool = True,
+        cross_fit: int = 0,
         **tree_params,
     ) -> None:
         self.df = df
-        self.tree_params: dict[str, object] = {"use_gpu": use_gpu, **tree_params}
+        self.tree_params: dict[str, object] = {
+            "use_gpu": use_gpu, "seed": seed, **tree_params
+        }
+        self.estimator_params: dict[str, object] = {
+            **self.tree_params, "correction": correction, "cross_fit": cross_fit
+        }
+        self.cross_fit = cross_fit
         self.x_scaler = x_scaler
         self.n_sample = n_sample
         self.seed = seed
@@ -164,11 +176,13 @@ class Plotter:
 
         if has_controls and has_instrument:
             y_arr, x_arr, z_arr = cross_fit_residualize(
-                w_arr, y_arr, x_arr, z_arr, tree_params=self.tree_params
+                w_arr, y_arr, x_arr, z_arr, tree_params=self.tree_params,
+                n_folds=self.cross_fit or 3, seed=self.seed,
             )
         elif has_controls:
             y_arr, x_arr = cross_fit_residualize(
-                w_arr, y_arr, x_arr, tree_params=self.tree_params
+                w_arr, y_arr, x_arr, tree_params=self.tree_params,
+                n_folds=self.cross_fit or 3, seed=self.seed,
             )
 
         return x_arr.reshape(-1, 1), y_arr, z_arr
@@ -221,18 +235,20 @@ class Plotter:
     ) -> BaseEstimator:
         """Fit and return the estimator for a given moment."""
         if moment == "mean":
-            return MeanEstimator(**self.tree_params).fit(x, y)
+            return MeanEstimator(**self.estimator_params).fit(x, y)
         elif moment == "variance":
-            return VarianceEstimator(**self.tree_params).fit(x, y)
+            return VarianceEstimator(**self.estimator_params).fit(x, y)
         elif moment == "covariance":
             if z is None:
                 raise ValueError("moment='covariance' requires z")
-            return CovarianceEstimator(**self.tree_params).fit(x, y, z)
+            return CovarianceEstimator(**self.estimator_params).fit(x, y, z)
         elif moment == "correlation":
             if z is None:
                 raise ValueError("moment='correlation' requires z")
             return (
-                CovarianceEstimator(**self.tree_params).fit(x, y, z).fit_correlation()
+                CovarianceEstimator(**self.estimator_params)
+                .fit(x, y, z)
+                .fit_correlation()
             )
         else:
             raise ValueError(f"Unknown moment: {moment!r}")
@@ -281,6 +297,13 @@ class Plotter:
             controls_label = None
 
         x_arr, y_arr, z_arr = self._prepare_arrays(x, y, z, partial_out)
+
+        # variance estimator does both mean and variance: 
+        if moment == "mean" and bands and cache_key not in self.estimators:
+            var_est = self._get_estimator(
+                ("variance", x, y, po_key), "variance", x_arr, y_arr
+            )
+            self.estimators[cache_key] = var_est.mean_estimator_
 
         estimator = self._get_estimator(cache_key, moment, x_arr, y_arr, z_arr)
 
@@ -566,6 +589,8 @@ def plot_relationship(
     x_name: str = "X",
     y_name: str = "Y",
     z_name: str = "Z",
+    correction: bool = True,
+    cross_fit: int = 0,
     **tree_params,
 ) -> PlotResult:
     """Plot the conditional moment of y given x.
@@ -585,6 +610,9 @@ def plot_relationship(
         x_name: Label for the x-axis.
         y_name: Label for the y variable.
         z_name: Label for the z variable (covariance/correlation).
+        correction: Leverage/LOO residual correction (see BaseEstimator).
+        cross_fit: k-fold cross-fitting for the estimators (see BaseEstimator).
+            When set, also used as the fold count for partialling out.
         **tree_params: Forwarded to KernelTree (use_gpu, kernel_type, etc.).
 
     Returns:
@@ -605,33 +633,48 @@ def plot_relationship(
 
     if partial_out is not None:
         (W,) = validate(partial_out)
+        n_folds = cross_fit or 3
+        fold_seed = tree_params.get("seed", 42)
         if z is not None:
-            y, x, z = cross_fit_residualize(W, y, x, z, tree_params=tree_params)
+            y, x, z = cross_fit_residualize(
+                W, y, x, z, tree_params=tree_params, n_folds=n_folds, seed=fold_seed
+            )
         else:
-            y, x = cross_fit_residualize(W, y, x, tree_params=tree_params)
+            y, x = cross_fit_residualize(
+                W, y, x, tree_params=tree_params, n_folds=n_folds, seed=fold_seed
+            )
 
     x_2d = x.reshape(-1, 1)
 
     _validate_moment(moment, z)
 
+    estimator_params = {"correction": correction, "cross_fit": cross_fit, **tree_params}
+    var_est = None
     if moment == "mean":
-        estimator = MeanEstimator(**tree_params).fit(x_2d, y)
+        if bands:
+            # the variance fit contains its own full-sample mean fit — reuse it
+            var_est = VarianceEstimator(**estimator_params).fit(x_2d, y)
+            estimator = var_est.mean_estimator_
+        else:
+            estimator = MeanEstimator(**estimator_params).fit(x_2d, y)
     elif moment == "variance":
-        estimator = VarianceEstimator(**tree_params).fit(x_2d, y)
+        estimator = VarianceEstimator(**estimator_params).fit(x_2d, y)
     elif moment == "covariance":
-        estimator = CovarianceEstimator(**tree_params).fit(x_2d, y, z)
+        estimator = CovarianceEstimator(**estimator_params).fit(x_2d, y, z)
     elif moment == "correlation":
-        estimator = CovarianceEstimator(**tree_params).fit(x_2d, y, z).fit_correlation()
+        estimator = (
+            CovarianceEstimator(**estimator_params).fit(x_2d, y, z).fit_correlation()
+        )
 
     x_pred = np.linspace(
-        np.quantile(x, self.style.x_quantile_trim),
-        np.quantile(x, 1 - self.style.x_quantile_trim),
+        np.quantile(x, style.x_quantile_trim),
+        np.quantile(x, 1 - style.x_quantile_trim),
         n_grid,
         dtype=np.float32,
     )
     x_grid = np.linspace(
-        np.quantile(x_plot, self.style.x_quantile_trim),
-        np.quantile(x_plot, 1 - self.style.x_quantile_trim),
+        np.quantile(x_plot, style.x_quantile_trim),
+        np.quantile(x_plot, 1 - style.x_quantile_trim),
         n_grid,
         dtype=np.float32,
     )
@@ -646,10 +689,7 @@ def plot_relationship(
         fig = ax.get_figure()
 
     if moment == "mean":
-        y_var = None
-        if bands:
-            var_est = VarianceEstimator(**tree_params).fit(x_2d, y)
-            y_var = var_est.predict(x_pred.reshape(-1, 1))
+        y_var = var_est.predict(x_pred.reshape(-1, 1)) if bands else None
         _plot_mean(ax, x_plot, y, x_grid, y_values, style, y_var, y_name=y_name)
     elif moment == "variance":
         _plot_variance(ax, x_grid, y_values, style, x_name=x_name, y_name=y_name)
@@ -663,10 +703,10 @@ def plot_relationship(
         )
 
     ax.set_xlabel(x_name)
-    if self.style.x_lim is not None:
-        ax.set_xlim(*self.style.x_lim)
-    if self.style.y_lim is not None:
-        ax.set_ylim(*self.style.y_lim)
+    if style.x_lim is not None:
+        ax.set_xlim(*style.x_lim)
+    if style.y_lim is not None:
+        ax.set_ylim(*style.y_lim)
 
     return PlotResult(
         x_values=x_grid,

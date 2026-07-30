@@ -14,13 +14,21 @@ class BaseEstimator:
         overlap_epsilon: float = 0.1,
         use_gpu: bool = False,
         kernel_type: str = "laplace",
-        search_rounds: int = 15,
-        bounds: tuple[float, float] = (0.10, 8.5),
+        search_rounds: int = 7,
+        bounds: tuple[float, float] = (0.10, 25.0),
         initial_precision: float = 1.0,
         sample_share: float = 1.0,
-        precision_method: str = "pilot-cv",
-        pilot_factor: float = 2.0,
+        precision_method: str = "pilot-aicc",
+        pilot_factor: float = 2.5,
+        correction: bool = True,
+        seed: int | None = None,
+        cross_fit: int = 0,
     ) -> None:
+
+        if cross_fit < 0 or cross_fit == 1:
+            raise ValueError("cross_fit must be 0 (off) or >= 2 (k-fold).")
+        self.correction = correction # internal param
+        self.cross_fit = cross_fit  # internal param; supersedes correction when >= 2
         self.tree_params: dict[str, object] = dict(
             min_sample=min_sample,
             max_sample=max_sample,
@@ -34,6 +42,7 @@ class BaseEstimator:
             sample_share=sample_share,
             precision_method=precision_method,
             pilot_factor=pilot_factor,
+            seed=seed,
         )
 
     def __repr__(self) -> str:
@@ -51,7 +60,12 @@ class BaseEstimator:
 
 
 class MeanEstimator(BaseEstimator):
-    """Estimates E[Y|X] using kernel regression (Nadaraya-Watson via KernelTree)."""
+    """
+    Estimates E[Y|X] using kernel regression (Nadaraya-Watson via KernelTree).
+
+    With cross_fit=k (k >= 2) out-of-fold predictions and residuals are stored. 
+    predict() always comes from the full-sample fit.
+    """
 
     def __init__(self, use_gpu: bool = False, **kwargs) -> None:
         super().__init__(use_gpu=use_gpu, **kwargs)
@@ -60,6 +74,12 @@ class MeanEstimator(BaseEstimator):
     def fit(self, X: np.ndarray, y: np.ndarray) -> "MeanEstimator":
         X, y = validate(X, y)
         self.tree_ = self._make_tree().fit(X, y)
+        if self.cross_fit >= 2:
+            (self.residuals_,) = cross_fit_residualize(
+                X, y, tree_params=self.tree_params,
+                n_folds=self.cross_fit, seed=self.tree_params["seed"],
+            )
+            self.training_predictions_ = y - self.residuals_
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -70,11 +90,18 @@ class MeanEstimator(BaseEstimator):
 
 
 class VarianceEstimator(BaseEstimator):
-    """Estimates Var[Y|X] using the Fan & Yao double kernel approach.
+    """
+    Estimates Var[Y|X] using the Fan & Yao double kernel approach.
 
     Pass 1: Fit KernelTree on (X, y) with bandwidth h1 to get residuals.
     Pass 2: Fit KernelTree on (X, residuals^2) with independently optimized
     bandwidth h2 to estimate the conditional variance.
+
+    With correction=True (default), pass 2 uses leave-one-out residuals
+    (y - m)/(1 - S_ii), removing own-observation suppression.
+
+    With cross_fit=k (k >= 2), pass 2 uses out-of-fold residuals.
+    predict() always comes from the full-sample fits.
     """
 
     def __init__(self, use_gpu: bool = False, **kwargs) -> None:
@@ -89,7 +116,16 @@ class VarianceEstimator(BaseEstimator):
         # pass 1: estimate conditional mean
         self.mean_estimator_ = MeanEstimator(**self.tree_params).fit(X, y)
         self.training_mean_ = self.mean_estimator_.predict(X)
-        residuals = y - self.training_mean_
+        if self.cross_fit >= 2:
+            # out-of-fold residuals; no own-observation term, so no correction
+            (residuals,) = cross_fit_residualize(
+                X, y, tree_params=self.tree_params,
+                n_folds=self.cross_fit, seed=self.tree_params["seed"],
+            )
+        else:
+            residuals = y - self.training_mean_
+            if self.correction:
+                residuals = residuals / (1.0 - self.mean_estimator_.tree_.self_weights(X))
 
         # pass 2: estimate conditional variance from squared residuals
         squared_residuals = residuals**2
@@ -112,10 +148,18 @@ class VarianceEstimator(BaseEstimator):
 
 
 class CovarianceEstimator(BaseEstimator):
-    """Estimates Cov[Y, Z|X] using the double kernel approach.
+    """
+    Estimates Cov[Y, Z|X] using the double kernel approach.
 
     Fits E[Y|X] and E[Z|X] separately, computes residuals, then fits
     E[residual_y * residual_z | X] with its own bandwidth.
+
+    With correction=True (default), the y and z residuals are each replaced
+    by their leave-one-out counterparts (r/(1 - S_ii) to counter own-observation
+    suppression.
+
+    With cross_fit=k (k >= 2), both residuals are out-of-fold.
+    predict() always comes from the full-sample fits.
     """
 
     def __init__(self, use_gpu: bool = False, **kwargs) -> None:
@@ -134,8 +178,17 @@ class CovarianceEstimator(BaseEstimator):
         # compute residual products
         self.training_mean_y_ = self.mean_y_estimator_.predict(X)
         self.training_mean_z_ = self.mean_z_estimator_.predict(X)
-        residuals_y = y - self.training_mean_y_
-        residuals_z = z - self.training_mean_z_
+        if self.cross_fit >= 2:
+            residuals_y, residuals_z = cross_fit_residualize(
+                X, y, z, tree_params=self.tree_params,
+                n_folds=self.cross_fit, seed=self.tree_params["seed"],
+            )
+        else:
+            residuals_y = y - self.training_mean_y_
+            residuals_z = z - self.training_mean_z_
+            if self.correction:
+                residuals_y = residuals_y / (1.0 - self.mean_y_estimator_.tree_.self_weights(X))
+                residuals_z = residuals_z / (1.0 - self.mean_z_estimator_.tree_.self_weights(X))
         residual_product = residuals_y * residuals_z
 
         # fit conditional covariance
@@ -199,9 +252,10 @@ def cross_fit_residualize(
     *targets: np.ndarray,
     tree_params: dict[str, object] | None = None,
     n_folds: int = 3,
-    seed: int = 42,
+    seed: int | None = 42,
 ) -> tuple[np.ndarray, ...]:
-    """Cross-fitted residualization (sample splitting, cf. Chernozhukov et al. 2018).
+    """
+    Cross-fitted residualization (Chernozhukov et al. 2018).
 
     Splits data into n_folds. For each fold, fits E[target|W] on the
     other folds and predicts on the held-out fold. Returns out-of-fold

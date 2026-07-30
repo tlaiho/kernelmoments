@@ -30,16 +30,20 @@ No linting or formatting tools are configured.
 
 ### Estimators (`kernelmoments/estimators.py`)
 
-All estimators follow sklearn-style `fit()`/`predict()` and share KernelTree parameters via `BaseEstimator`.
+All estimators follow sklearn-style `fit()`/`predict()` and share KernelTree parameters via `BaseEstimator`. `seed: int | None = None` on `BaseEstimator` is forwarded to KernelTree; the default is an unseeded (irreproducible) bandwidth search — pass an int for deterministic fits. Tests pass `seed=42`.
 
 - **MeanEstimator** — E[Y|X]. Thin wrapper over KernelTree.
 - **VarianceEstimator** — Var[Y|X]. Fan & Yao double kernel: pass 1 fits the mean and gets residuals, pass 2 fits E[ε²|X] with a separately optimized (typically larger) bandwidth. Exposes `mean_estimator_` for the pass-1 model.
 - **CovarianceEstimator** — Cov[Y,Z|X]. Three kernel regressions: E[Y|X], E[Z|X], then E[εʸ·εᶻ|X]. Also provides `fit_correlation()`/`predict_correlation()` for conditional correlation.
-- **`cross_fit_residualize()`** — Chernozhukov et al. (2018) cross-fitted residualization for partialling out confounders (used by `CovarianceEstimator` when `partial_out` is set).
+- **Leverage correction** — `correction: bool = True` on `BaseEstimator` (stored outside `tree_params`). Variance/Covariance estimators smooth leave-one-out residuals `(y − ŷ)/(1 − S_ii)` with `S_ii` from `KernelTree.self_weights()` (kernelboost ≥ 0.4.0), removing own-observation suppression. `correction=False` restores raw in-sample residuals. See `residual_correction_plan.md`.
+- **Cross-fitting** — `cross_fit: int = 0` on `BaseEstimator` (outside `tree_params`; 0 = off, k ≥ 2 = k-fold, 1/negative raise). When set, in-sample residuals/fitted values are out-of-fold via `cross_fit_residualize` (fold seed = estimator's `seed`), superseding `correction`; `predict()` always comes from the full-sample fits. `MeanEstimator` additionally stores OOF `training_predictions_`/`residuals_`.
+- **`cross_fit_residualize()`** — Chernozhukov et al. (2018) cross-fitted residualization. Used by the estimators' `cross_fit` machinery and by `Plotter`'s `partial_out` path (partialling out lives in the plotter, not the estimators: it residualizes the conditioning variable too, which has no well-defined `predict()` semantics at the estimator level).
 
 ### Plotter (`kernelmoments/plotter.py`)
 
 `Plotter` class wraps the estimators for visualization with pandas/polars DataFrame support. `plot_relationship()` is a standalone convenience function for quick NumPy-based plots. Supports mean (with ±1.96·√Var bands), variance, covariance, and correlation moments. Caches fitted estimators.
+
+Estimator-level args (`correction`, `cross_fit`) are named parameters on both `Plotter` and `plot_relationship`, kept in `Plotter.estimator_params` separately from `tree_params` (which holds only KernelTree kwargs — the split matters because `cross_fit_residualize` splats `tree_params` into its fold fits). `Plotter.seed` (default 42) seeds subsampling, partial-out folds, and kernel fits, so plots are reproducible by default. `partial_out=W` residualizes y, x (and z) on W — FWL-style; the fold count is `cross_fit` when set, else 3. `bands=True` reuses the variance estimator's internal mean fit instead of fitting a separate `MeanEstimator`.
 
 ### Utils (`kernelmoments/utils.py`)
 

@@ -54,6 +54,8 @@ p.plot(x="age", y="income", moment="variance")            # conditional variance
 p.plot(x="age", y="income", z="spending", moment="correlation")  # conditional correlation
 ```
 
+For skewed conditioning variables, `Plotter(df, x_scaler=RankTransformer())` (from `kernelboost.utilities`) fits in rank space while plotting in original units — evening out data density along x typically gives visibly smoother curves.
+
 ### Estimators directly
 
 ```python

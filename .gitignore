@@ -9,5 +9,6 @@ build/
 *.so
 tests/
 docs/
+plots/
 .ipynb_checkpoints/
 README_PYPI.md

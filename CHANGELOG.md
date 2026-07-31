@@ -8,7 +8,7 @@
 - `seed` on `BaseEstimator` (default `None`) for reproducible fits
 - `Plotter`: `correction`/`cross_fit`/`seed` as named args; `partial_out` fold count follows `cross_fit`; `bands=True` reuses the variance estimator's mean fit
 - Fixed `NameError` in `plot_relationship` (`self.style` in a standalone function)
-- Fixed `partial_out` display: plots now shown in residualized space (scaler inverse-transform no longer applies)§
+- Fixed `partial_out` display: plots now shown in residualized space (scaler inverse-transform no longer applies)
 - Fixed `Plotter.x_scaler`: cloned per x column instead of shared
 - Renamed `unconditional*()` → `mean_conditional_{variance,covariance,correlation}()`
 

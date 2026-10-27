@@ -8,7 +8,7 @@
 
 Estimate and visualize conditional moments — means, variances, covariances, and correlations — using adaptive kernel regression. Built on [kernelboost](https://github.com/tlaiho/kernelboost)'s `KernelTree`, which partitions data and fits local Nadaraya-Watson estimators with automatic bandwidth selection.
 
-Designed for interactive data exploration. Achieves subsecond fitting even on larger datasets (CPU: 5-10k rows, GPU: 25-50k rows). See the [tutorial](examples/tutorial.ipynb) for a full walkthrough and the [wages example](examples/wages.ipynb) for cross-fitted partialling out.
+Designed for interactive data exploration. Computationally fast for a kernel method: subsecond fitting with CPU for 5-10k rows and with GPU for 25-50k rows. See the [tutorial](examples/tutorial.ipynb) and the [wages example](examples/wages.ipynb) on how to use the package.
 
 ![Conditional moments of Coca-Cola and PepsiCo returns given S&P 500](assets/hero.png)
 
@@ -18,10 +18,10 @@ Designed for interactive data exploration. Achieves subsecond fitting even on la
 pip install kernelmoments
 ```
 
-For GPU acceleration (CUDA 12):
+For GPU acceleration, also install the CuPy wheel matching your CUDA version:
 
 ```bash
-pip install kernelmoments[gpu]
+pip install kernelmoments cupy-cuda13x   # or cupy-cuda12x
 ```
 
 ## Quick start
@@ -54,7 +54,8 @@ p.plot(x="age", y="income", moment="variance")            # conditional variance
 p.plot(x="age", y="income", z="spending", moment="correlation")  # conditional correlation
 ```
 
-For skewed conditioning variables, `Plotter(df, x_scaler=RankTransformer())` (from `kernelboost.utilities`) fits in rank space while plotting in original units — evening out data density along x typically gives visibly smoother curves.
+Scaling data beforehand is a good idea for kernel methods. `Plotter` takes an `x_scaler` argument, which it uses to fit in scaled units and plot in original units. scikit-learn scalers work, as does `RankTransformer` (re-exported from `kernelboost` as `kernelmoments.RankTransformer`), which is used in the examples.
+
 
 ### Estimators directly
 

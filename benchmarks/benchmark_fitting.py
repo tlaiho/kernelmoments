@@ -1,4 +1,4 @@
-"""Benchmark wall-clock fitting times for all estimators across sample sizes."""
+"""Benchmarks fitting times (wall-clock) for all estimators across sample sizes."""
 
 import statistics
 import time

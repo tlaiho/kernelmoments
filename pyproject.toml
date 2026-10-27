@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kernelmoments"
-version = "0.2.0"
+version = "0.2.1"
 description = "Data visualisation and estimation tools based on kernel regression"
 readme = "README_PYPI.md"
 requires-python = ">=3.10"
@@ -33,9 +33,6 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/tlaiho/kernelmoments"
 Issues = "https://github.com/tlaiho/kernelmoments/issues"
-
-[project.optional-dependencies]
-gpu = ["cupy-cuda12x"]
 
 [tool.setuptools.packages.find]
 include = ["kernelmoments*"]

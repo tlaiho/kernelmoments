@@ -1,3 +1,5 @@
+"Classes for estimating moments using KernelTree."
+
 import numpy as np
 from kernelboost.tree import KernelTree
 from .utils import validate
@@ -8,7 +10,7 @@ class BaseEstimator:
 
     def __init__(
         self,
-        max_sample: int = 2500,
+        max_sample: int = 5000,
         min_sample: int = 750,
         max_depth: int = 3,
         overlap_epsilon: float = 0.1,
